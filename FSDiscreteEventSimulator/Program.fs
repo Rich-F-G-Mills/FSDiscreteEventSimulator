@@ -3,26 +3,10 @@ open System
 open System.Linq
 open MathNet.Numerics.Distributions
 
-open DiscreteEventSimulator
-open DiscreteEventSimulator.Common
-open DiscreteEventSimulator.Component
+open FSDiscreteEventSimulator
+open FSDiscreteEventSimulator.Common
+open FSDiscreteEventSimulator.Component
 
-
-
-
-
-let randomWaitTime distSampler start count =
-    let samples =
-        distSampler
-        |> Seq.scan (+) start
-        |> Seq.tail
-
-    match count with
-    | Some count' when count' > 0 ->
-        samples
-        |> Seq.take count'
-
-    | _ -> samples
     
 let createSamplerFromDist (distribution: IContinuousDistribution) start count =    
     let distSamples =
@@ -40,18 +24,16 @@ let createSamplerFromDist (distribution: IContinuousDistribution) start count =
         WaitSampler distSamples
 
 
-
-
+[<StructuredFormatDisplay("DefaultUser<'{Id}'>")>]
 type DefaultUser (Id: string) =
     interface IUser with
         member _.Id = Id
 
+    member this.Id = (this :> IUser).Id
+
     static member createRandomInstance () =
         DefaultUser <| (Guid.NewGuid()).ToString()
-
-
-                    
-                
+          
   
 let alertSink =
     createUserSink "Process alerts"
@@ -75,4 +57,17 @@ let desNetwork =
     |> Network.addInstantiator alertSource2
     |> Network.finalise
 
-printfn "TEST"
+let events =
+    desNetwork
+    |> Network.simulate
+    |> Seq.take 50
+    |> Seq.toList
+
+printfn "The following users were created:"
+
+events
+|> Seq.choose (function
+    | Successful ({ Request = CreateUser user }) -> Some user
+    | _ -> None)
+|> Seq.iter (printfn "   %A")
+
