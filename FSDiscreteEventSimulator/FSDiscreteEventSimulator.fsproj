@@ -7,12 +7,13 @@
 
   <ItemGroup>
     <Compile Include="Common.fs" />
+    <Compile Include="Components\UserSource.fs" />
+    <Compile Include="Components\UserProcessor.fs" />
+    <Compile Include="Components\UserQueue.fs" />
+    <Compile Include="Components\UserSink.fs" />
     <Compile Include="Network.fs" />
-    <Compile Include="Component.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
-
-  <ItemGroup />
 
   <ItemGroup>
     <PackageReference Include="MathNet.Numerics" Version="4.15.0" />

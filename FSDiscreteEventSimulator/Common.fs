@@ -1,10 +1,9 @@
 ﻿
 namespace FSDiscreteEventSimulator
 
-open System.Collections.Generic
-
 module Common =
 
+    open System.Collections.Generic
     open System.Collections.Immutable
 
 
@@ -25,9 +24,9 @@ module Common =
             abstract member Id: string with get
         end
 
-    type Outcome<'T> =
-        | Successful of 'T
-        | UserDropped of 'T
+    type Outcome =
+        | Successful
+        | UserDropped
     
     type SimulationContext<'TUser when 'TUser :> IUser> =
         { Timestamp: float
@@ -40,37 +39,33 @@ module Common =
 
     and DESLocalRequest<'TUser when 'TUser :> IUser> =
         { Timestamp: DESTimestamp
-          Request: DESRequestType<'TUser> }
+          User: 'TUser
+          Type: DESRequestType<'TUser> }
 
-    and [<StructuredFormatDisplay("{Formatted}")>]
-        DESRequest<'TUser when 'TUser :> IUser> =
+    and DESRequest<'TUser when 'TUser :> IUser> =
         { Timestamp: float
-          Requestor: IDESComponent<'TUser>
-          Request: DESRequestType<'TUser> }
-
-        member this.Formatted =            
-            sprintf "%-40s   %A"
-                (sprintf "'%s' @ %.3f:" this.Requestor.Name this.Timestamp)
-                this.Request            
+          Requestor: IDESComponentInstantiator<'TUser>
+          User: 'TUser
+          Type: DESRequestType<'TUser> }          
     
     and [<StructuredFormatDisplayAttribute("{Formatted}")>]
         DESRequestType<'TUser when 'TUser :> IUser> =
-        | CreateUser of User: 'TUser
-        | MoveUser of User: 'TUser * To: IDESUserRecieverInstantiator<'TUser>
-        | MoveUserWithMap of UserBefore: 'TUser * UserAfter: 'TUser * To: IDESUserRecieverInstantiator<'TUser>
-        | DestroyUser of User: 'TUser
+        | CreateUser
+        | MoveUser of To: IDESUserRecieverInstantiator<'TUser>
+        | MoveUserWithMap of MapTo: 'TUser * To: IDESUserRecieverInstantiator<'TUser>
+        | DestroyUser
 
         member this.Formatted =
             match this with
-            | CreateUser user ->
-                sprintf "CreateUser %A" user
-            | MoveUser (user, target) ->
-                sprintf "MoveUser %A to '%s'" user target.Name
-            | MoveUserWithMap (userBefore, userAfter, target) ->
-                sprintf "MoveUserWithMap %A -> %A to '%s'"
-                    userBefore userAfter target.Name
-            | DestroyUser user ->
-                sprintf "DestroyUser %A" user
+            | CreateUser ->
+                sprintf "CreateUser"
+            | MoveUser target ->
+                sprintf "MoveUser to '%s'" target.Name
+            | MoveUserWithMap (userAfter, target) ->
+                sprintf "MoveUserWithMap %A to '%s'"
+                    userAfter target.Name
+            | DestroyUser ->
+                sprintf "DestroyUser"
 
         override this.ToString() =
             this.Formatted
@@ -79,7 +74,7 @@ module Common =
     and IDESComponent<'TUser when 'TUser :> IUser> =
         interface
             abstract member Name: string with get
-            abstract member NextEvents: float * 'TUser seq -> DESLocalRequest<'TUser> list
+            abstract member NextEvents: float -> DESLocalRequest<'TUser> list
         end
 
     and IDESUserReciever<'TUser when 'TUser :> IUser> =
@@ -107,11 +102,11 @@ module Common =
             abstract member HasDestroyed: float * 'TUser -> unit
         end
 
-
-    and IDESComponentInstantiator<'TUser when 'TUser :> IUser> =
-        interface
+    and IDESComponentInstantiator<'TUser when 'TUser :> IUser> =        
+        interface            
             abstract member Name: string with get
-            abstract member Create: unit -> IDESComponent<'TUser>
+            abstract member Description: string with get
+            abstract member Create: System.Random * IReadOnlySet<'TUser> * IDESTargetProxy<'TUser> list -> IDESComponent<'TUser>
         end
 
     and IDESUserRecieverInstantiator<'TUser when 'TUser :> IUser> =
@@ -122,5 +117,18 @@ module Common =
     and IDESUserSenderInstantiator<'TUser when 'TUser :> IUser> =
         interface
             inherit IDESComponentInstantiator<'TUser>
-            abstract member Target: IDESUserRecieverInstantiator<'TUser> with get
+            abstract member Targets: IDESUserRecieverInstantiator<'TUser> list with get
+        end
+
+    and IDESUserProcessorInstantiator<'TUser when 'TUser :> IUser> =
+        interface
+            inherit IDESUserRecieverInstantiator<'TUser>
+            inherit IDESUserSenderInstantiator<'TUser>
+        end
+
+    and IDESTargetProxy<'TUser when 'TUser :> IUser> =
+        interface
+            abstract member CanRecieve: float * 'TUser -> bool
+            abstract member UserList: IReadOnlySet<'TUser>
+            abstract member Instantiator: IDESUserRecieverInstantiator<'TUser>
         end

@@ -3,6 +3,7 @@ namespace FSDiscreteEventSimulator
 
 module Network =
 
+    open System.Collections.Generic
     open System.Collections.Immutable
     open Common
 
@@ -13,8 +14,15 @@ module Network =
     type DESBuiltNetwork<'TUser when 'TUser :> IUser> =
         private DESFinalisedNetwork of IDESComponentInstantiator<'TUser> list
 
+    type private DESInstantiatorDetails<'TUser when 'TUser :> IUser> =
+        { Instantiator: IDESComponentInstantiator<'TUser>
+          Instance: IDESComponent<'TUser>
+          Users: HashSet<'TUser> }
+
+
     let empty =
         DESNetwork []
+
 
     let addInstantiator instantiator (DESNetwork network) =
         if network |> List.contains instantiator then
@@ -22,16 +30,27 @@ module Network =
         else
             DESNetwork (instantiator :: network)
 
+
+    // This carries out a topological sort of the network. Sink nodes are effectively processed first with
+    // all others being processed in a sensible order afterwards.
     let finalise (DESNetwork network) =
         let rec inner (ordered: IDESComponentInstantiator<_> list) newOrdered tried unordered =
             match newOrdered, tried, unordered with
             | _, _, u::us ->
                 match (u: IDESComponentInstantiator<_>) with
                 | :? IDESUserSenderInstantiator<_> as u' ->
-                    if ordered |> List.contains u'.Target then
-                        inner ordered (u::newOrdered) tried us
-                    else
-                        inner ordered newOrdered (u::tried) us
+                    u'.Targets
+                    // Check to see if all of the targets are within the supplied list of instantiators.
+                    |> Seq.tryFind (fun t -> not (network |> List.contains t))
+                    |> function
+                        | Some t ->
+                            failwith <| sprintf "Component '%s' has target '%s' which does not exist in network."
+                                u.Name t.Name
+                        | None ->
+                            if u'.Targets |> Seq.forall (fun t -> ordered |> List.contains t) then
+                                inner ordered (u::newOrdered) tried us
+                            else
+                                inner ordered newOrdered (u::tried) us
                 | _ ->
                     inner ordered (u::newOrdered) tried us
             | [], [], [] ->
@@ -43,150 +62,190 @@ module Network =
 
         DESFinalisedNetwork <| inner [] [] [] network
 
+
     let private processUserCreate
-            (requestor: IDESComponent<_>)
-            newUser
-            (ctx: SimulationContext<_>) =
+            (instantiatorDetailMappings: ImmutableDictionary<IDESComponentInstantiator<'TUser>, DESInstantiatorDetails<'TUser>>)
+            (requestor: IDESComponentInstantiator<'TUser>)
+            (newUser: 'TUser)
+            timestamp = 
 
-        let usersForComponent =
-            ctx.Users[requestor]     
+        let requestorDetails =
+            instantiatorDetailMappings[requestor]
 
-        if usersForComponent.Contains newUser then
+        if not <| requestorDetails.Users.Add(newUser) then
             failwith <| sprintf "Unable to create user '%s' as already exists in '%s'."
                 newUser.Id requestor.Name
 
-        let newUsersForComponent =
-            usersForComponent.Add(newUser)
-
         let (requestor': IDESUserCreator<_>) =
-            downcast requestor   
+            downcast requestorDetails.Instance   
 
-        requestor'.HasCreated (ctx.Timestamp, newUser)
+        requestor'.HasCreated (timestamp, newUser)
 
-        Successful { ctx with Users = ctx.Users.SetItem(requestor, newUsersForComponent) }
+        Successful
+
 
     let private processUserMoveWithMap
-            (instantiatorMapping: ImmutableDictionary<IDESComponentInstantiator<'TUser>, IDESComponent<'TUser>>)
-            (requestor: IDESComponent<'TUser>)
+            (instantiatorDetailMappings: ImmutableDictionary<IDESComponentInstantiator<'TUser>, DESInstantiatorDetails<'TUser>>)
+            (requestor: IDESComponentInstantiator<'TUser>)
             (userBefore: 'TUser)
             (userAfter: 'TUser)
             (targetInst: IDESUserRecieverInstantiator<'TUser>)
-            (ctx: SimulationContext<'TUser>) =
+            timestamp =
 
-        let usersForComponent =
-            ctx.Users[requestor]
+        let requestorDetails =
+            instantiatorDetailMappings[requestor]
 
-        if not <| usersForComponent.Contains(userBefore) then
+        if not <| instantiatorDetailMappings.ContainsKey(targetInst) then
+            failwith <| sprintf "Target '%s' does not exist in network." targetInst.Name
+
+        if not <| requestorDetails.Users.Remove(userBefore) then
             failwith <| sprintf "Cannot move user '%s' from '%s' to '%s' as not allocated to component."
                 userBefore.Id requestor.Name targetInst.Name
 
-        if not <| instantiatorMapping.ContainsKey(targetInst) then
-            failwith <| sprintf "Target '%s' does not exist in network." targetInst.Name
-
-        let target =
-            instantiatorMapping[targetInst]
-
-        let targetUsers =
-            ctx.Users[target]
-
-        if targetUsers.Contains(userAfter) then
-            failwith <| sprintf "Cannot move user '%s' from '%s' to '%s' as already exists."
-                userAfter.Id requestor.Name target.Name
-
-        let newSourceUsers =
-            usersForComponent.Remove(userBefore)
-
         let (requestor': IDESUserSender<_>) =
-            downcast requestor
+            downcast requestorDetails.Instance
 
-        requestor'.HasSent (ctx.Timestamp, userBefore)
+        requestor'.HasSent (timestamp, userBefore)        
 
-        let ctx =
-            { ctx with Users = ctx.Users.SetItem(requestor, newSourceUsers) }
-            
+        let targetDetails =
+            instantiatorDetailMappings[targetInst]
+          
         let (target': IDESUserReciever<_>) =
-            downcast target
+            downcast targetDetails.Instance
 
-        if target'.CanRecieve (ctx.Timestamp, userAfter) then
+        if target'.CanRecieve (timestamp, userAfter) then
 
-            let newTargetUsers =
-                targetUsers.Add(userAfter)
+            if not <| targetDetails.Users.Add(userAfter) then
+                failwith <| sprintf "Cannot move user '%s' from '%s' to '%s' as already exists."
+                    userAfter.Id requestor.Name targetInst.Name
 
-            Successful { ctx with Users = ctx.Users.SetItem(target, newTargetUsers) }
+            target'.HasRecieved (timestamp, userAfter)
+
+            Successful
 
         else
-            UserDropped ctx
+            UserDropped
+
         
     let private processUserDestroy
-            (requestor: IDESComponent<'TUser>)
+            (instantiatorDetailMappings: ImmutableDictionary<IDESComponentInstantiator<'TUser>, DESInstantiatorDetails<'TUser>>)
+            (requestor: IDESComponentInstantiator<'TUser>)
             (user: 'TUser)
-            (ctx: SimulationContext<'TUser>) =      
+            timestamp =
+            
+        let requestorDetails =
+            instantiatorDetailMappings[requestor]
 
-        let usersForComponent =
-            ctx.Users[requestor]
-
-        if not <| usersForComponent.Contains user then
+        if not <| requestorDetails.Users.Remove (user) then
             failwith <| sprintf "Unable to destroy user '%s' as not present in '%s'."
                 user.Id requestor.Name
 
-        let newUsersForComponent =
-            usersForComponent.Remove(user)
-
         let (requestor': IDESUserDestroyer<_>) =
-            downcast requestor  
+            downcast requestorDetails.Instance  
 
-        requestor'.HasDestroyed (ctx.Timestamp, user)
+        requestor'.HasDestroyed (timestamp, user)
 
-        Successful { ctx with Users = ctx.Users.SetItem(requestor, newUsersForComponent) }
+        Successful
 
-    let private processEvent
-            (instantiatorMapping: ImmutableDictionary<IDESComponentInstantiator<'TUser>, IDESComponent<'TUser>>)
-            (ctx: SimulationContext<'TUser>)
-            { Requestor = requestor; Request = request } =
 
-        match request with
-        | CreateUser newUser ->
-            processUserCreate requestor newUser ctx
+    let private processEvent instantiatorDetailMappings timestamp { Requestor = requestor; User = user; Type = reqType } =
+        match reqType with
+        | CreateUser ->
+            processUserCreate instantiatorDetailMappings requestor user timestamp
 
-        | MoveUser (user, targetInst) ->
-            processUserMoveWithMap instantiatorMapping requestor user user targetInst ctx
+        | MoveUser targetInst ->
+            processUserMoveWithMap instantiatorDetailMappings requestor user user targetInst timestamp
 
-        | MoveUserWithMap (userBefore, userAfter, targetInst) ->
-            processUserMoveWithMap instantiatorMapping requestor userBefore userAfter targetInst ctx
+        | MoveUserWithMap (userAfter, targetInst) ->
+            processUserMoveWithMap instantiatorDetailMappings requestor user userAfter targetInst timestamp
 
-        | DestroyUser user ->
-            processUserDestroy requestor user ctx
+        | DestroyUser ->
+            processUserDestroy instantiatorDetailMappings requestor user timestamp
 
-    let simulate (DESFinalisedNetwork network) =
-        let components =
-            network
-            |> List.map (fun c -> c.Create())
 
-        let instantiatorMapping =
-            components
-            |> Seq.zip network
-            |> Seq.toImmutableDictionary
+    // Creates a mapping between the original instantiators and the resulting instances.
+    // This also injects proxy targets into those instances as required.
+    // Note that proxy targets are used so that one component instance in a network does not
+    // have direct sight of another instance.
+    let private buildInstanceMapping randomizer network =
+        let rec inner (instantiatorMappings: ImmutableDictionary<_,_>) (proxyMappings: ImmutableDictionary<_,_>) =
+            function
+            | i::is ->
+                // This will (eventually) contain the users assigned to this component.
+                let userSet = new HashSet<_>()
 
-        let startingContext =
-            { Timestamp = 0.0
-              Users =
-                components
-                |> Seq.map (fun u -> u, ImmutableHashSet.Empty)
-                |> Seq.toImmutableDictionary }                        
+                // Create a new instance for our instantiator.
+                let newInstance =
+                    match (i: IDESComponentInstantiator<'TUser>) with
+                    // Check to see if we have a sender instantiator. If so, we need
+                    // to track the targets so that we can get the corresponding target proxies.
+                    | :? IDESUserSenderInstantiator<'TUser> as sender ->
+                        let targetProxies =
+                            sender.Targets
+                            |> List.map (fun t -> proxyMappings[t])
 
-        let rec inner ctx =
+                        i.Create(randomizer, userSet :> IReadOnlySet<_>, targetProxies)
+
+                    // Otherwise, create without any target proxies specified.
+                    | _ ->
+                        i.Create(randomizer, userSet :> IReadOnlySet<_>, [])
+
+                let newInstantiatorDetails =
+                    { Instantiator = i; Instance = newInstance; Users = userSet }
+
+                let newInstantiatorMappings =
+                    instantiatorMappings.Add(i, newInstantiatorDetails)
+
+                let newProxyMappings =
+                    match i, newInstance with
+                    // Check to see if we have a reciever instantiator and corresponding reciever instance.
+                    // If so, we need to create a target proxy for the new instance and track for future use.
+                    | (:? IDESUserRecieverInstantiator<'TUser> as rI), (:? IDESUserReciever<'TUser> as r) ->
+                        let newProxy =
+                            { new IDESTargetProxy<_> with
+                                member this.UserList = userSet :> IReadOnlySet<_>
+                                member _.CanRecieve (timestamp, user) = r.CanRecieve (timestamp, user)
+                                member _.Instantiator = rI }
+
+                        proxyMappings.Add(rI, newProxy)
+
+                    | (:? IDESUserRecieverInstantiator<'TUser>), _ ->
+                        failwith <| sprintf "Instantiator '%s' marked as a reciever but instance is a non-reciever?"
+                            i.Name
+
+                    | _ -> proxyMappings
+
+                inner newInstantiatorMappings newProxyMappings is
+
+            | [] -> instantiatorMappings
+
+        inner ImmutableDictionary.Empty ImmutableDictionary.Empty network
+
+
+    // This is called each time a simulation of a finalised network is required.
+    let simulate randomizer (DESFinalisedNetwork network) =
+        let instantiatorDetailMappings =
+            buildInstanceMapping randomizer network
+            
+        let instantiatorDetails =
+            instantiatorDetailMappings.Values
+            |> List.ofSeq
+
+        let rec inner timestamp =
+            // Build a complete list of events from all components in the network.
+            // TODO - This could be improved to short-circuit as soon as an Immediate request is posted.
             let nextEvents =
-                components
-                |> Seq.collect (fun c ->
-                    let usersForComponent = ctx.Users[c]
-
-                    c.NextEvents (ctx.Timestamp, usersForComponent) |> Seq.map (function
-                        | { Timestamp = Immediate; Request = request } ->
-                            { Timestamp = ctx.Timestamp; Requestor = c; Request = request }
-                        | { Timestamp = Relative o; Request = request } when o >= 0.0 ->
-                            { Timestamp = ctx.Timestamp + o; Requestor = c; Request = request }
-                        | { Timestamp = Absolute t; Request = request } when t >= ctx.Timestamp ->
-                            { Timestamp = t; Requestor = c; Request = request }
+                instantiatorDetails
+                |> Seq.collect (fun { Instantiator = i; Instance = c } ->
+                    // Here we need to convert the local requests into complete requests that include
+                    // details of the requestor (instance).
+                    c.NextEvents (timestamp) |> Seq.map (function
+                        | { Timestamp = Immediate; User = user; Type = reqType } ->
+                            { Timestamp = timestamp; Requestor = i; User = user; Type = reqType }
+                        | { Timestamp = Relative o; User = user; Type = reqType } when o >= 0.0 ->
+                            { Timestamp = timestamp + o; Requestor = i; User = user; Type = reqType }
+                        | { Timestamp = Absolute t; User = user; Type = reqType } when t >= timestamp ->
+                            { Timestamp = t; Requestor = i; User = user; Type = reqType }
                         | { Timestamp = ts; } ->
                             failwith <| sprintf "Unable to process event raised by '%s' with timestamp '%A'."
                                 c.Name ts))
@@ -196,37 +255,36 @@ module Network =
                 Seq.empty
 
             else
+                // Get the next timestamp that we need to roll-forward to.
                 let nextTimestamp =
                     nextEvents
                     |> Seq.map (fun { Timestamp = ts } -> ts)
                     |> Seq.min
 
+                // Get the first component which has an event at that timestamp.
+                let nextComponentToAction =
+                    nextEvents
+                    |> List.pick (function
+                        | { Requestor = requestor; Timestamp = ts }
+                            when ts = nextTimestamp -> Some requestor
+                        | _ -> None)
+
+                // Get all other events for that same component and that same timestamp.
                 let nextEventsToAction =
                     nextEvents
-                    |> Seq.filter (fun { Timestamp = ts } -> ts = nextTimestamp)
+                    |> Seq.filter (function
+                        | { Requestor = requestor; Timestamp = ts } ->
+                            obj.ReferenceEquals(requestor, nextComponentToAction) && ts = nextTimestamp)
 
-                let mutable ctx =
-                    { ctx with Timestamp = nextTimestamp }
+                seq {                  
+                    for event in nextEventsToAction do
+                        let outcome =
+                            processEvent instantiatorDetailMappings nextTimestamp event
 
-                seq {
-                    for e in nextEventsToAction do
-                        let ctx' =
-                            processEvent instantiatorMapping ctx e
+                        yield (outcome, event)
 
-                        ctx <-
-                            match ctx' with
-                            | Successful ctx'' | UserDropped ctx'' ->
-                                ctx''
-
-                        let e' =
-                            match ctx' with
-                            | Successful _ -> Successful e
-                            | UserDropped _ -> UserDropped e
-
-                        yield e'
-
-                    yield! inner ctx
+                    yield! inner nextTimestamp
                 }
 
-        inner startingContext    
+        inner 0.0
                             
