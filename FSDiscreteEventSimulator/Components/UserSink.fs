@@ -31,7 +31,7 @@ module UserSink =
             member _.Name = name
 
             member _.Description =
-                sprintf "%s<'%s'>" typedefof<UserSink<_>>.Name name
+                sprintf "%s<'%s'>" typedefof<UserSink<'TUser>>.Name name
 
             member _.Create (_, userCollection, targetProxies) =
                 match targetProxies with

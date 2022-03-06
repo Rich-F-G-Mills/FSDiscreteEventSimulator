@@ -23,23 +23,22 @@ module UserProcessor =
                         failwith <| sprintf "No user being processed but %i user(s) assigned."
                             users.Count
 
+                    | Some (finishTime, _) when timestamp > finishTime ->
+                        failwith <| sprintf "Current timestamp of %f has moved beyond creation time of %f."
+                            timestamp finishTime
+
+                    | Some (_, user') when users.Count <> 1 ->
+                        failwith <| sprintf "Currently processing user '%s' but %i user(s) assigned."
+                            user'.Id users.Count
+
+                    | Some (_, user') when not <| users.Contains (user') ->
+                        failwith <| sprintf "Currently processing user '%s' but '%s' assigned."
+                            user'.Id (users |> Seq.exactlyOne).Id
+
                     | Some (finishTime, user') ->
-                        if timestamp > finishTime then
-                            failwith <| sprintf "Current timestamp of %f has moved beyond creation time of %f."
-                                timestamp finishTime
-
-                        elif users.Count <> 1 then
-                            failwith <| sprintf "Currently processing user '%s' but %i user(s) assigned."
-                                user'.Id users.Count
-
-                        elif not <| users.Contains (user') then
-                            failwith <| sprintf "Currently processing user '%s' but '%s' assigned."
-                                user'.Id (users |> Seq.exactlyOne).Id
-
-                        else
-                            [{ Timestamp = Absolute finishTime
-                               User = user'
-                               Type = MoveUser target }]
+                        [{ Timestamp = Absolute finishTime
+                           User = user'
+                           Type = MoveUser target }]
                                
 
             interface IDESUserReciever<'TUser> with
@@ -61,17 +60,16 @@ module UserProcessor =
                 member _.HasSent (timestamp, user) =
                     userBeingProcessed <-
                         match userBeingProcessed with
-                        | Some (finishTime, user') ->
-                            if timestamp <> finishTime then
-                                failwith <| sprintf "Expected to send user '%s' at %f but was sent intead at %f."
-                                    user.Id finishTime timestamp  
+                        | Some (finishTime, _) when timestamp <> finishTime->
+                            failwith <| sprintf "Expected to send user '%s' at %f but was sent intead at %f."
+                                user.Id finishTime timestamp  
 
-                            elif not <| obj.ReferenceEquals(user, user') then
-                                failwith <| sprintf "Expected to send '%s' but asked to send '%s' instead."
-                                    user'.Id user.Id
+                        | Some (_, user') when not <| obj.ReferenceEquals(user, user') ->
+                            failwith <| sprintf "Expected to send '%s' but asked to send '%s' instead."
+                                user'.Id user.Id
 
-                            else
-                                None                                                   
+                        | Some _ ->
+                            None                                                   
 
                         | None ->
                             failwith <| sprintf "User '%s' set but none have been processed." user.Id                            
@@ -84,7 +82,7 @@ module UserProcessor =
             member _.Name = name
 
             member _.Description =
-                sprintf "%s<'%s'>" typedefof<UserProcessor<_>>.Name name
+                sprintf "%s<'%s'>" typedefof<UserProcessor<'TUser>>.Name name
 
             member _.Create (randomizer, userCollection, targetProxies) =
                 let waitTimeGenerator =

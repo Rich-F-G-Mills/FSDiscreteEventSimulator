@@ -42,7 +42,7 @@ module UserQueue =
         interface IDESUserSender<'TUser> with
             member this.HasSent (_, user) =
                 match userQueue.Dequeue() with
-                | user' when obj.ReferenceEquals(user, user') -> ()
+                | user' when user =|= user' -> ()
                 | user' ->
                     failwith <| sprintf "Expected to send user '%s' but user '%s' sent instead."
                         user'.Id user.Id
@@ -55,7 +55,7 @@ module UserQueue =
             member _.Name = name
 
             member _.Description =
-                sprintf "%s<'%s'>" typedefof<UserQueue<_>>.Name name
+                sprintf "%s<'%s'>" typedefof<UserQueue<'TUser>>.Name name
 
             member _.Create (_, _, targetProxies) =
                 UserQueue (name, maxCapacity, targetProxies)

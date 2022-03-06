@@ -85,11 +85,11 @@ module Network =
 
 
     let private processUserMoveWithMap
-            (instantiatorDetailMappings: ImmutableDictionary<IDESComponentInstantiator<'TUser>, DESInstantiatorDetails<'TUser>>)
-            (requestor: IDESComponentInstantiator<'TUser>)
-            (userBefore: 'TUser)
             (userAfter: 'TUser)
             (targetInst: IDESUserRecieverInstantiator<'TUser>)
+            (instantiatorDetailMappings: ImmutableDictionary<IDESComponentInstantiator<'TUser>, DESInstantiatorDetails<'TUser>>)
+            (requestor: IDESComponentInstantiator<'TUser>)
+            (userBefore: 'TUser)            
             timestamp =
 
         let requestorDetails =
@@ -149,18 +149,25 @@ module Network =
 
 
     let private processEvent instantiatorDetailMappings timestamp { Requestor = requestor; User = user; Type = reqType } =
-        match reqType with
-        | CreateUser ->
-            processUserCreate instantiatorDetailMappings requestor user timestamp
+        let processor =
+            match reqType with
+            | CreateUser ->
+                processUserCreate
 
-        | MoveUser targetInst ->
-            processUserMoveWithMap instantiatorDetailMappings requestor user user targetInst timestamp
+            | MoveUser targetInst ->
+                processUserMoveWithMap user targetInst
 
-        | MoveUserWithMap (userAfter, targetInst) ->
-            processUserMoveWithMap instantiatorDetailMappings requestor user userAfter targetInst timestamp
+            | MoveUserWithMap (userAfter, targetInst) ->
+                processUserMoveWithMap userAfter targetInst
 
-        | DestroyUser ->
-            processUserDestroy instantiatorDetailMappings requestor user timestamp
+            | DestroyUser ->
+                processUserDestroy
+
+        processor instantiatorDetailMappings requestor user timestamp
+
+    let checkInstanceImplementations (insantiator: IDESComponentInstantiator<'TUser>) (instance: IDESComponent<'TUser>) =
+        insantiator :? IDESUserRecieverInstantiator<_> = instance :? IDESUserReciever<_>
+            
 
 
     // Creates a mapping between the original instantiators and the resulting instances.
@@ -197,10 +204,13 @@ module Network =
                     instantiatorMappings.Add(i, newInstantiatorDetails)
 
                 let newProxyMappings =
-                    match i, newInstance with
+                    match i with
                     // Check to see if we have a reciever instantiator and corresponding reciever instance.
                     // If so, we need to create a target proxy for the new instance and track for future use.
-                    | (:? IDESUserRecieverInstantiator<'TUser> as rI), (:? IDESUserReciever<'TUser> as r) ->
+                    | :? IDESUserRecieverInstantiator<'TUser> as rI ->
+                        let (r: IDESUserReciever<'TUser>) =
+                            downcast newInstance
+                        
                         let newProxy =
                             { new IDESTargetProxy<_> with
                                 member this.UserList = userSet :> IReadOnlySet<_>
@@ -208,10 +218,6 @@ module Network =
                                 member _.Instantiator = rI }
 
                         proxyMappings.Add(rI, newProxy)
-
-                    | (:? IDESUserRecieverInstantiator<'TUser>), _ ->
-                        failwith <| sprintf "Instantiator '%s' marked as a reciever but instance is a non-reciever?"
-                            i.Name
 
                     | _ -> proxyMappings
 
@@ -221,6 +227,23 @@ module Network =
 
         inner ImmutableDictionary.Empty ImmutableDictionary.Empty network
 
+
+    let private (|ToFloat|) currentTimestamp = function
+        | Immediate -> currentTimestamp
+        | Relative o -> currentTimestamp + o
+        | Absolute ts -> ts
+
+
+    let private getEventsForInstance timestamp { Instantiator = i; Instance = c } =
+        // Here we need to convert the local requests into complete requests that include
+        // details of the requestor (instance).
+        c.NextEvents (timestamp) |> Seq.map (function
+            | { Timestamp = ToFloat timestamp eventTs; User = user; Type = reqType }
+                when eventTs >= timestamp ->
+                    { Timestamp = eventTs; Requestor = i; User = user; Type = reqType }
+            | { Timestamp = eventTs; } ->
+                failwith <| sprintf "Unable to process event raised by '%s' with historic timestamp of '%A'."
+                    c.Name eventTs)
 
     // This is called each time a simulation of a finalised network is required.
     let simulate randomizer (DESFinalisedNetwork network) =
@@ -236,19 +259,7 @@ module Network =
             // TODO - This could be improved to short-circuit as soon as an Immediate request is posted.
             let nextEvents =
                 instantiatorDetails
-                |> Seq.collect (fun { Instantiator = i; Instance = c } ->
-                    // Here we need to convert the local requests into complete requests that include
-                    // details of the requestor (instance).
-                    c.NextEvents (timestamp) |> Seq.map (function
-                        | { Timestamp = Immediate; User = user; Type = reqType } ->
-                            { Timestamp = timestamp; Requestor = i; User = user; Type = reqType }
-                        | { Timestamp = Relative o; User = user; Type = reqType } when o >= 0.0 ->
-                            { Timestamp = timestamp + o; Requestor = i; User = user; Type = reqType }
-                        | { Timestamp = Absolute t; User = user; Type = reqType } when t >= timestamp ->
-                            { Timestamp = t; Requestor = i; User = user; Type = reqType }
-                        | { Timestamp = ts; } ->
-                            failwith <| sprintf "Unable to process event raised by '%s' with timestamp '%A'."
-                                c.Name ts))
+                |> Seq.collect (getEventsForInstance timestamp)
                 |> Seq.toList
 
             if nextEvents.IsEmpty then
@@ -274,9 +285,10 @@ module Network =
                     nextEvents
                     |> Seq.filter (function
                         | { Requestor = requestor; Timestamp = ts } ->
-                            obj.ReferenceEquals(requestor, nextComponentToAction) && ts = nextTimestamp)
+                            requestor =|= nextComponentToAction && ts = nextTimestamp)
 
-                seq {                  
+                seq {
+                    // Action those events.
                     for event in nextEventsToAction do
                         let outcome =
                             processEvent instantiatorDetailMappings nextTimestamp event

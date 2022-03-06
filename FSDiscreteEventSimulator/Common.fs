@@ -7,6 +7,10 @@ module Common =
     open System.Collections.Immutable
 
 
+    let inline internal (=|=) obj1 obj2 =
+        obj.ReferenceEquals (obj1, obj2)
+
+
     module Seq =
         open System.Linq
 
@@ -46,7 +50,7 @@ module Common =
         { Timestamp: float
           Requestor: IDESComponentInstantiator<'TUser>
           User: 'TUser
-          Type: DESRequestType<'TUser> }          
+          Type: DESRequestType<'TUser> }  
     
     and [<StructuredFormatDisplayAttribute("{Formatted}")>]
         DESRequestType<'TUser when 'TUser :> IUser> =
@@ -69,7 +73,6 @@ module Common =
 
         override this.ToString() =
             this.Formatted
-
 
     and IDESComponent<'TUser when 'TUser :> IUser> =
         interface
